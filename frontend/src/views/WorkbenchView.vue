@@ -6,6 +6,22 @@
         <p class="page-desc">{{ meta.desc }}</p>
       </div>
       <div class="page-actions">
+        <RouterLink
+          v-if="meta.key === 'adhoc_export'"
+          class="btn"
+          data-testid="open-workbench-hint"
+          to="/adhoc_export/1/detail"
+        >
+          打开导出详情
+        </RouterLink>
+        <RouterLink
+          v-if="meta.key === 'report_subscription'"
+          class="btn"
+          data-testid="open-subscription-workbench"
+          to="/report_subscription/workbench"
+        >
+          订阅工作台
+        </RouterLink>
         <button class="btn primary" data-testid="open-create" type="button" @click="openCreate">
           登记{{ meta.entity }}
         </button>
@@ -60,6 +76,22 @@
             >
               {{ action }}
             </button>
+            <RouterLink
+              v-if="meta.key === 'adhoc_export'"
+              class="link"
+              :data-testid="`detail-${row.id}`"
+              :to="`/adhoc_export/${row.id}/detail`"
+            >
+              详情
+            </RouterLink>
+            <RouterLink
+              v-if="meta.key === 'report_subscription'"
+              class="link"
+              :data-testid="`workbench-${row.id}`"
+              :to="`/report_subscription/workbench?subscription=${row.id}`"
+            >
+              工作台
+            </RouterLink>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -86,6 +118,8 @@
       </form>
     </div>
 
+    <p v-if="actionMessage" class="notice-text" data-testid="action-message">{{ actionMessage }}</p>
+
     <footer class="page-foot">
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
@@ -110,6 +144,7 @@ const meta = moduleMeta(props.moduleKey)
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const actionMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = meta.fields.slice(0, 3)
 const showCreate = ref(false)
@@ -167,12 +202,17 @@ async function submitCreate() {
 
 async function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
+  actionMessage.value = ''
   try {
     const result = await applyAction(meta.key, Number(row.id), action)
+    // 动作可能“执行成功但业务未完成”（例如产物已写完、仍待签收），
+    // 这种情况把服务端说明原样展示，不能当作失败吞掉。
+    actionMessage.value = result.message
     if (!result.ok) throw new Error(result.message)
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '操作失败'
+    await reload()
   }
 }
 

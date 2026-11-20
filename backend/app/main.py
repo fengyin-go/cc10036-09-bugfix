@@ -336,7 +336,7 @@ def _sample_metric_timeseries() -> list[float]:
     return values
 
 
-# 资源路由含 /api/{module}，必须放在 health / overview 之后注册，
-# 否则固定路径会被动态路径抢先匹配。
+# workflow 路由含固定前缀 /api/workflow，先于资源路由注册；资源路由含
+# /api/{module}，必须放在 health / overview 之后，否则固定路径会被动态路径抢先匹配。
 for module in ROUTERS:
     app.include_router(module.router)

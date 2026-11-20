@@ -205,19 +205,22 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
     "adhoc_export": [
         {
             "id": 1, "status": "已完成", "pending": False, "abnormal": False,
-            "任务名称": "Q3分城市DAU明细", "查询SQL": "SELECT city, date, dau FROM cube_user_behavior WHERE q='2026Q3'",
+            "任务名称": "Q3分城市DAU明细",
+            "报表对象": "核心指标监控大盘", "查询SQL": "SELECT city, date, dau FROM cube_user_behavior WHERE q='2026Q3'",
             "导出格式": "csv", "行数限制": "50000", "是否压缩": "是",
             "分区过滤": "q='2026Q3'", "创建时间": "2026-10-20",
         },
         {
             "id": 2, "status": "执行中", "pending": True, "abnormal": False,
-            "任务名称": "10月交易类目汇总", "查询SQL": "SELECT category, SUM(gmv) FROM cube_trade WHERE month='202610' GROUP BY category",
+            "任务名称": "10月交易类目汇总",
+            "报表对象": "营收分析看板", "查询SQL": "SELECT category, SUM(gmv) FROM cube_trade WHERE month='202610' GROUP BY category",
             "导出格式": "csv", "行数限制": "100000", "是否压缩": "否",
             "分区过滤": "month='202610'", "创建时间": "2026-10-22",
         },
         {
             "id": 3, "status": "排队中", "pending": True, "abnormal": False,
-            "任务名称": "用户画像全量导出", "查询SQL": "SELECT * FROM dim_user_profile WHERE status='active'",
+            "任务名称": "用户画像全量导出",
+            "报表对象": "用户留存分析看板", "查询SQL": "SELECT * FROM dim_user_profile WHERE status='active'",
             "导出格式": "json", "行数限制": "2000000", "是否压缩": "是",
             "分区过滤": "", "创建时间": "2026-10-22",
         },

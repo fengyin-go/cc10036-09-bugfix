@@ -69,6 +69,37 @@ npm run dev
 | 数据范围 | `olap_scope` | 范围规则 | 规则名称、数据范围、授权对象 |
 | 实验分析 | `ab_analysis` | 实验配置 | 实验名称、对照组、实验组 |
 
+## 导出签收与订阅交付
+
+即席导出的产物、队列和订阅交付是三个独立事实，靠 `backend/app/services/export_receipts.py`
+里的签收账本对齐；`adhoc_export` 只负责产出与签收，`report_subscription` 只读取已签收的数据。
+
+执行分两段：**开始导出**认领任务并写完产物（任务停在“执行中”、产物进入“文件已写完、待签收”），
+**完成导出**才签收并释放队列。文件写在 `EXPORT_ARTIFACT_DIR`（缺省 `~/.cache/cc10036/exports`），
+先写临时文件再原子替换，凭证里记录大小和 SHA-256，交付前逐字节校验。
+
+| 状态 | 含义 | 是否排队 | 订阅可读取 |
+| --- | --- | --- | --- |
+| 待执行 | 已认领，还没有产物 | 执行租约 | 否 |
+| 文件已写完 | 产物落盘，尚未签收 | 待签收档 | 否 |
+| 已签收 | 状态与队列都已确认 | 否 | 是 |
+| 需补跑 | 产物缺失或校验失败 | 否（等重新执行） | 否 |
+| 已过期 | 清理过期，不再补跑 | 否 | 否 |
+
+相关接口（`backend/app/routers/workflow.py`）：
+
+- `GET /api/workflow/adhoc-export/{task_id}/detail`：产物、签收次数、待处理项、队列位置；
+- `POST /api/workflow/adhoc-export/recover`：中断恢复，核对原签收、补签收、清理残留队列、列出需补跑项；
+- `GET /api/workflow/adhoc-export/receipts`：导出签收数据，供订阅工作台读取；
+- `GET /api/workflow/report-subscription/{id}/board`：工作台面板，本期签收次数与读取过的文件；
+- `POST /api/workflow/report-subscription/deliver`：交付一次，只读已签收产物，同一份不重复消费；
+- `POST /api/workflow/report-subscription/month-close`：月结，重复触发幂等。
+
+前端入口：即席导出列表的「详情」进入 `/adhoc_export/:taskId/detail`，
+报表订阅列表的「工作台」进入 `/report_subscription/workbench`。
+
+测试：`cd backend && .venv/bin/python -m unittest discover -s tests -v`。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

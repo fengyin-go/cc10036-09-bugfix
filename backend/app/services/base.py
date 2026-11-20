@@ -14,6 +14,9 @@ class BaseModuleService:
     STATUS_ORDER: list[str] = []
     ACTION_RULES: dict[str, str] = {}
     NEGATIVE_ACTIONS: list[str] = []
+    # 终态判定：设置了就只把这些状态视为待处理，避免“最后一个状态之外都算待处理”
+    # 把已完成的工作重新算进待处理队列。
+    PENDING_STATUSES: list[str] | None = None
 
     def list_entries(
         self,
@@ -67,7 +70,10 @@ class BaseModuleService:
         if target is None:
             return None, f"动作「{action}」不属于{self.MODULE}可执行范围"
         entry["status"] = target
-        entry["pending"] = target != self.STATUS_ORDER[-1]
+        if self.PENDING_STATUSES is not None:
+            entry["pending"] = target in self.PENDING_STATUSES
+        else:
+            entry["pending"] = target != self.STATUS_ORDER[-1]
         entry["abnormal"] = action in self.NEGATIVE_ACTIONS
         return entry, f"{self.ENTITY}已{action}"
 

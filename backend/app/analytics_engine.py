@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -733,39 +734,175 @@ def recommend_materialization(
 # ---------------------------------------------------------------------------
 
 class ExportScheduler:
-    """异步导出任务调度器（基于优先级队列）。"""
+    """异步导出任务调度器（优先级队列 + 显式租约）。
+
+    队列里的 ticket 只代表“还有工作待执行”。任务一旦签收或进入终态，
+    必须由 ``complete`` 把 ticket 和租约一起清掉，否则会出现
+    “文件已写完、任务已显示完成，队列里却还残留同一笔工作”。
+    """
 
     def __init__(self, max_concurrent: int = 3):
         self._queue: list[dict[str, Any]] = []
-        self._running: set[str] = set()
+        self._running: dict[str, float] = {}  # task_id -> 租约开始时间
+        # 已产出文件、但还没被签收的工作。它不是“待执行”，也不是“已完成”，
+        # 独立成一档，避免完成项留在可执行队列里，也避免签收点被悄悄跳过。
+        self._awaiting: dict[str, float] = {}  # task_id -> 写完时间
+        self._lock = threading.RLock()
         self.max_concurrent = max_concurrent
+
+    # ---- 入队与领取 ----
 
     def enqueue(
         self, task_id: str, priority: int = 0,
         sql: str = "", format: str = "csv",
     ) -> str:
-        self._queue.append({
-            "task_id": task_id,
-            "priority": priority,
-            "sql": sql,
-            "format": format,
-            "enqueued_at": time.time(),
-        })
-        self._queue.sort(key=lambda x: (-x["priority"], x["enqueued_at"]))
-        return task_id
+        """登记一个待执行 ticket；同一任务重复登记只保留一份。"""
+        with self._lock:
+            tid = str(task_id)
+            if tid in self._running or tid in self._awaiting:
+                return tid
+            if any(ticket["task_id"] == tid for ticket in self._queue):
+                return tid
+            self._queue.append({
+                "task_id": tid,
+                "priority": priority,
+                "sql": sql,
+                "format": format,
+                "enqueued_at": time.time(),
+            })
+            self._queue.sort(key=lambda x: (-x["priority"], x["enqueued_at"]))
+            return tid
+
+    def claim(self, task_id: str | None = None) -> dict[str, Any] | None:
+        """原子领取一个 ticket 并建立租约；已被领取的任务返回 None。
+
+        不传 task_id 时按优先级领取队首；传入时只领取该任务自己的 ticket。
+        直接提交、尚未入队的任务也会补一张 ticket 再领取，保证“有执行就有租约”。
+        """
+        with self._lock:
+            if task_id is None:
+                if not self._queue or len(self._running) >= self.max_concurrent:
+                    return None
+                ticket = self._queue.pop(0)
+            else:
+                tid = str(task_id)
+                if tid in self._running or tid in self._awaiting:
+                    return None
+                index = next(
+                    (i for i, ticket in enumerate(self._queue) if ticket["task_id"] == tid),
+                    None,
+                )
+                if index is None:
+                    ticket = {
+                        "task_id": tid, "priority": 0, "sql": "", "format": "csv",
+                        "enqueued_at": time.time(),
+                    }
+                else:
+                    ticket = self._queue.pop(index)
+            if len(self._running) >= self.max_concurrent:
+                # 并发已满：把 ticket 放回队首，维持原有排队语义。
+                self._queue.insert(0, ticket)
+                return None
+            self._running[ticket["task_id"]] = time.time()
+            return dict(ticket)
 
     def dequeue(self) -> dict[str, Any] | None:
-        if not self._queue or len(self._running) >= self.max_concurrent:
-            return None
-        task = self._queue.pop(0)
-        self._running.add(task["task_id"])
-        return task
+        """按优先级领取队首任务（保留旧调用方式）。"""
+        return self.claim()
 
-    def complete(self, task_id: str) -> None:
-        self._running.discard(task_id)
+    # ---- 签收 / 失败 / 对账 ----
+
+    def await_sign_off(self, task_id: str) -> bool:
+        """文件已写完：租约结束，工作转入待签收档，仍占着队列的责任。"""
+        with self._lock:
+            tid = str(task_id)
+            if tid in self._awaiting:
+                return False
+            self._running.pop(tid, None)
+            self._queue = [ticket for ticket in self._queue if ticket["task_id"] != tid]
+            self._awaiting[tid] = time.time()
+            return True
+
+    def is_awaiting(self, task_id: str) -> bool:
+        with self._lock:
+            return str(task_id) in self._awaiting
+
+    def complete(self, task_id: str) -> bool:
+        """任务已签收或已终态：同时释放租约、待签收档和残留 ticket。"""
+        with self._lock:
+            tid = str(task_id)
+            removed = any(ticket["task_id"] == tid for ticket in self._queue)
+            self._queue = [ticket for ticket in self._queue if ticket["task_id"] != tid]
+            self._running.pop(tid, None)
+            removed = self._awaiting.pop(tid, None) is not None or removed
+            return removed
+
+    def abandon(self, task_id: str) -> bool:
+        """执行失败或中断：释放租约、丢弃 ticket，等恢复流程重新判断是否补跑。"""
+        return self.complete(task_id)
+
+    # ---- 状态查询 ----
+
+    def is_queued(self, task_id: str) -> bool:
+        with self._lock:
+            return any(ticket["task_id"] == str(task_id) for ticket in self._queue)
+
+    def is_running(self, task_id: str) -> bool:
+        with self._lock:
+            return str(task_id) in self._running
 
     def queue_size(self) -> int:
-        return len(self._queue)
+        with self._lock:
+            return len(self._queue)
 
     def running_count(self) -> int:
-        return len(self._running)
+        with self._lock:
+            return len(self._running)
+
+    def awaiting_count(self) -> int:
+        with self._lock:
+            return len(self._awaiting)
+
+    def pending_count(self) -> int:
+        """还没签收的工作总数：排队 + 执行 + 待签收。"""
+        with self._lock:
+            return len(self._queue) + len(self._running) + len(self._awaiting)
+
+    def inspect(self) -> dict[str, Any]:
+        """输出队列快照，便于详情页显示“待处理项”。"""
+        now = time.time()
+        with self._lock:
+            queue = [
+                {
+                    "task_id": ticket["task_id"],
+                    "priority": ticket["priority"],
+                    "enqueued_at": ticket["enqueued_at"],
+                    "waiting_seconds": round(now - ticket["enqueued_at"], 1),
+                }
+                for ticket in self._queue
+            ]
+            running = [
+                {
+                    "task_id": tid,
+                    "claimed_at": claimed_at,
+                    "running_seconds": round(now - claimed_at, 1),
+                }
+                for tid, claimed_at in self._running.items()
+            ]
+            awaiting = [
+                {
+                    "task_id": tid,
+                    "written_at": written_at,
+                    "awaiting_seconds": round(now - written_at, 1),
+                }
+                for tid, written_at in self._awaiting.items()
+            ]
+        return {
+            "queue_size": len(queue),
+            "running_count": len(running),
+            "awaiting_count": len(awaiting),
+            "pending_count": len(queue) + len(running) + len(awaiting),
+            "queue": queue,
+            "running": running,
+            "awaiting": awaiting,
+        }
